@@ -83,9 +83,9 @@ async def respond(req: ChatRequest):
         ]
 
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=messages,
-            temperature=0.7
+            temperature=0.4
         )
 
         reply = response.choices[0].message.content
