@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import openai
@@ -29,10 +29,12 @@ class ChatRequest(BaseModel):
     topic: str
     transcript: str
     history: list
+    session_id: str
     
 
 @app.post("/transcribe")
-async def transcribe(file: UploadFile = File(...)):
+async def transcribe(file: UploadFile = File(...), session_id: str = Form(...)):
+    unique_name = f"{session_id}_{file.filename}"
     with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
         shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
