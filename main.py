@@ -5,6 +5,7 @@ import openai
 import os
 import tempfile
 import shutil
+import fitz 
 
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -30,6 +31,28 @@ class ChatRequest(BaseModel):
     transcript: str
     history: list
     session_id: str
+
+resume_store = {}
+@app.post("/upload-resume")
+async def upload_resume(file: UploadFile = File(...),session_id: str = Form(...)):
+    try:
+        contents = await file.read()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(contents)
+            tmp_path = tmp.name
+
+        # Extract text using PyMuPDF
+        with fitz.open(tmp_path) as doc:
+            text = ""
+            for page in doc:
+                text += page.get_text()
+
+        os.remove(tmp_path)
+
+        resume_store[session_id] = text
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
     
 
 @app.post("/transcribe")
@@ -54,7 +77,18 @@ async def transcribe(file: UploadFile = File(...), session_id: str = Form(...)):
 @app.post("/respond")
 async def respond(req: ChatRequest):
     try:
-        prompt = (
+        if req.topic == "Resume Based Questions":
+            resume_text = resume_store.get(req.session_id)
+            prompt = (
+                "You are an AI interviewer asking resume-based questions. "
+                "Always respond in English. Use the following resume:\n\n"
+                f"{resume_text}\n\n"
+                "Start by asking questions based on the candidate's resume. "
+                "After each response, offer brief feedback(1 sentence) and ask the next question. "
+                "Avoid ending the interview early."
+            )
+        else:
+            prompt = (
             f"You are a friendly and professional AI interviewer for the topic: {req.topic}. "
             "Always respond in English. "
             "After each candidate response, first provide a brief encouraging or constructive comment (1 sentence), "
