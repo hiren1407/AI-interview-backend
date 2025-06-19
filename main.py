@@ -129,3 +129,45 @@ async def respond(req: ChatRequest):
 
     except Exception as e:
         return {"error": str(e)}
+    
+@app.post("/feedback")
+async def feedback(req: ChatRequest):
+    try:
+        resume_text = resume_store.get(req.session_id, "")
+        chat_log = "\n".join(
+            [f"{m['role'].capitalize()}: {m['content']}" for m in req.history]
+        )
+
+        prompt = (
+            "You're an expert AI interviewer. Based on the following interview transcript and resume (if any), "
+            "provide two things:\n\n"
+            "1. A score from 1 to 10 based on the candidate's overall performance.\n"
+            "2. A 3–5 sentence feedback highlighting strengths and areas for improvement.\n\n"
+        )
+
+        if resume_text:
+            prompt += f"Resume:\n{resume_text}\n\n"
+
+        prompt += f"Interview Transcript:\n{chat_log}\n\n"
+
+        prompt += (
+            "Respond in the following JSON format:\n"
+            '{"score": <number from 1 to 10>, "feedback": "<text>"}'
+        )
+
+        messages = [{"role": "system", "content": prompt}]
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.4
+        )
+
+        import json
+        parsed = json.loads(response.choices[0].message.content)
+
+        return parsed
+
+    except Exception as e:
+        return {"error": str(e)}
+
