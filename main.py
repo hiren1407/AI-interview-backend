@@ -9,7 +9,10 @@ import fitz
 
 from openai import OpenAI
 from dotenv import load_dotenv
+from fastapi.responses import StreamingResponse
+import io
 load_dotenv()
+import base64
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -89,43 +92,56 @@ async def respond(req: ChatRequest):
             )
         else:
             prompt = (
-            f"You are a friendly and professional AI interviewer for the topic: {req.topic}. "
-            "Always respond in English. "
-            "After each candidate response, first provide a brief encouraging or constructive comment (1 sentence), "
-            "then immediately ask the next concise and relevant interview question. "
-            "Avoid summarizing the entire interview or ending the session unless explicitly asked. "
-            "Do not say 'Do you have any questions?' or 'Thank you for your time' unless the user clearly signals the interview is over. "
-            "If the user goes off-topic, gently steer them back with a polite reminder."
-        )
+                f"You are a friendly and professional AI interviewer for the topic: {req.topic}. "
+                "Always respond in English. "
+                "After each candidate response, first provide a brief encouraging or constructive comment (1 sentence), "
+                "then immediately ask the next concise and relevant interview question. "
+                "Avoid summarizing the entire interview or ending the session unless explicitly asked. "
+                "Do not say 'Do you have any questions?' or 'Thank you for your time' unless the user clearly signals the interview is over. "
+                "If the user goes off-topic, gently steer them back with a polite reminder."
+            )
         
-        # If user transcript is empty, start the interview with first question
         if req.transcript.strip() == "":
             messages = [
-            {
-                "role": "system",
-                "content":(
-                    f"Welcome! Let's begin your interview on {req.topic}. "
-                    "Let me know when you're ready to start."
-                )
-            }
-            
-        ]
-            return {"reply": messages[0]["content"]}
+                {
+                    "role": "system",
+                    "content": (
+                        f"Welcome! Let's begin your interview on {req.topic}. "
+                        "Let me know when you're ready to start."
+                    )
+                }
+            ]
+            reply_text = messages[0]["content"]
         else:
             messages = [
-            {"role": "system", "content": prompt},
-            *req.history,
-            {"role": "user", "content": f"The candidate answered: \"{req.transcript}\""}
-        ]
+                {"role": "system", "content": prompt},
+                *req.history,
+                {"role": "user", "content": f"The candidate answered: \"{req.transcript}\""}
+            ]
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=messages,
-            temperature=0.4
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=messages,
+                temperature=0.4
+            )
+
+            reply_text = response.choices[0].message.content
+
+        # Generate TTS audio for the reply_text
+        tts_response = client.audio.speech.create(
+            model="tts-1",
+            voice="onyx",
+            input=reply_text
         )
+        audio_bytes = tts_response.content
 
-        reply = response.choices[0].message.content
-        return {"reply": reply}
+        # Convert audio bytes to base64 string for JSON transport
+        audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+
+        return {
+            "reply": reply_text,
+            "audio_base64": audio_base64
+        }
 
     except Exception as e:
         return {"error": str(e)}
@@ -170,5 +186,7 @@ async def feedback(req: ChatRequest):
 
     except Exception as e:
         return {"error": str(e)}
+
+
 
 #comment 
