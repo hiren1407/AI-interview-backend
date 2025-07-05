@@ -15,6 +15,8 @@ from dotenv import load_dotenv
 import requests
 import time
 import asyncio
+import httpx
+import aiofiles
 
 
 # from elevenlabs.client import ElevenLabs
@@ -117,18 +119,18 @@ def get_elevenlabs_audio_base64(text):
         return None
 
 
-def get_deepgram_audio_base64(text: str, voice: str = "aura-asteria-en"):
+async def get_deepgram_audio_base64(text: str, voice: str = "aura-asteria-en"):
     """
     Converts text to speech using Deepgram's TTS API and returns base64-encoded audio.
+    Non-blocking async version.
     """
-    try:
-        
-        if not text or not text.strip():
-            print("Deepgram TTS error: Empty text input.")
-            return None
+    if not text or not text.strip():
+        print("Deepgram TTS error: Empty text input.")
+        return None
 
+    try:
         DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
-        url = "https://api.deepgram.com/v1/speak"
+        url = f"https://api.deepgram.com/v1/speak?model={voice}"
 
         headers = {
             "Authorization": f"Token {DEEPGRAM_API_KEY}",
@@ -139,8 +141,8 @@ def get_deepgram_audio_base64(text: str, voice: str = "aura-asteria-en"):
             "text": text.strip()
         }
 
-        response = requests.post(url,json=payload, headers=headers )
-        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, json=payload, headers=headers)
 
         if response.status_code != 200:
             print("Deepgram TTS error:", response.json())
@@ -228,44 +230,51 @@ async def upload_resume(file: UploadFile = File(...),session_id: str = Form(...)
 
 @app.post("/transcribe")
 async def transcribe(file: UploadFile = File(...), session_id: str = Form(...)):
+    import time
     start = time.time()
-    
+
+    # Save uploaded audio file temporarily in a thread (blocking)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
-        shutil.copyfileobj(file.file, tmp)
+        await asyncio.to_thread(shutil.copyfileobj, file.file, tmp)
         tmp_path = tmp.name
 
     try:
-        # with open(tmp_path, "rb") as audio_file:
-        #     transcript = client.audio.transcriptions.create(
-        #         model="whisper-1",
-        #         file=audio_file
-        #     )
-        # return {"transcript": transcript.text}
-        with open(tmp_path, 'rb') as audio_file:
-            response = requests.post(
-                url="https://api.deepgram.com/v1/listen",
-                headers={
-                    "Authorization": f"Token {DEEPGRAM_API_KEY}",
-                    "Content-Type": file.content_type  # e.g., audio/webm
-                },
-                params={
-                    "punctuate": "true",
-                    "model": "nova",  # optional, most accurate
-                    "language": "en"
-                },
-                data=audio_file
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            async with aiofiles.open(tmp_path, "rb") as f:
+                audio_bytes = await f.read()
+
+            headers = {
+                "Authorization": f"Token {DEEPGRAM_API_KEY}",
+                "Content-Type": file.content_type,
+            }
+            params = {
+                "punctuate": "true",
+                "model": "nova",
+                "language": "en",
+            }
+
+            response = await client.post(
+                "https://api.deepgram.com/v1/listen",
+                headers=headers,
+                params=params,
+                content=audio_bytes
             )
 
-        result = response.json()
-
         if response.status_code != 200:
-            return {"error": result.get("error", "Transcription failed")}
+            try:
+                return {"error": response.json().get("error", "Transcription failed")}
+            except Exception:
+                return {"error": "Transcription failed and response was not JSON"}
 
-        transcript = result["results"]["channels"][0]["alternatives"][0]["transcript"]
-        print("Embedding took", time.time() - start)
+        result = response.json()
+        transcript = result["results"]["channels"][0]["alternatives"][0].get("transcript", "")
+
+        print("Transcription took:", time.time() - start)
         return {"transcript": transcript}
+
     except Exception as e:
         return {"error": str(e)}
+
     finally:
         os.remove(tmp_path)
 
@@ -285,7 +294,7 @@ async def respond(req: ChatRequest):
         f"Welcome! Let's begin your interview on {req.topic}. "
         "Let me know when you're ready to start."
     )
-            audio_base64 = await asyncio.to_thread(get_deepgram_audio_base64, welcome_text)
+            audio_base64 = await get_deepgram_audio_base64(welcome_text)
             return {
         "reply": welcome_text,
         "audio_base64": audio_base64
@@ -365,7 +374,7 @@ async def respond(req: ChatRequest):
 
         # # Convert audio bytes to base64 string for JSON transport
         # audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
-        audio_base64 = await asyncio.to_thread(get_deepgram_audio_base64, reply_text)
+        audio_base64 = await get_deepgram_audio_base64(reply_text)
         print("Embedding took", time.time() - start)
 
         return {
