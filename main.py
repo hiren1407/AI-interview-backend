@@ -13,6 +13,9 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from openai import OpenAI
 from dotenv import load_dotenv
 import requests
+import time
+import asyncio
+
 
 # from elevenlabs.client import ElevenLabs
 import io
@@ -67,32 +70,22 @@ class ChatRequest(BaseModel):
 resume_store = {}
 
 def pinecone_search(session_id: str):
-    
-
-    # Create query embedding (can customize this prompt later)
     query_embedding = client.embeddings.create(
         model="text-embedding-3-small",
         input="Give me relevant interview questions"
     ).data[0].embedding
 
-    resume_results = index.query(
+    results = index.query(
         vector=query_embedding,
-        top_k=5,
+        top_k=10,
         include_metadata=True,
-        filter={"session_id": session_id, "type": "resume"}
+        filter={"session_id": session_id}
     )
 
-    jd_results = index.query(
-        vector=query_embedding,
-        top_k=5,
-        include_metadata=True,
-        filter={"session_id": session_id, "type": "jd"}
-    )
+    resume_context = " ".join([r["metadata"]["text"] for r in results["matches"] if r["metadata"]["type"] == "resume"])
+    jd_context = " ".join([r["metadata"]["text"] for r in results["matches"] if r["metadata"]["type"] == "jd"])
 
-    resume_context = " ".join([r["metadata"]["text"] for r in resume_results["matches"]])
-    jd_context = " ".join([r["metadata"]["text"] for r in jd_results["matches"]])
-
-    return resume_context, jd_context if jd_results["matches"] else None
+    return resume_context, jd_context or None
 
 def get_elevenlabs_audio_base64(text):
     try:
@@ -235,6 +228,7 @@ async def upload_resume(file: UploadFile = File(...),session_id: str = Form(...)
 
 @app.post("/transcribe")
 async def transcribe(file: UploadFile = File(...), session_id: str = Form(...)):
+    start = time.time()
     
     with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
         shutil.copyfileobj(file.file, tmp)
@@ -268,17 +262,39 @@ async def transcribe(file: UploadFile = File(...), session_id: str = Form(...)):
             return {"error": result.get("error", "Transcription failed")}
 
         transcript = result["results"]["channels"][0]["alternatives"][0]["transcript"]
+        print("Embedding took", time.time() - start)
         return {"transcript": transcript}
     except Exception as e:
         return {"error": str(e)}
     finally:
         os.remove(tmp_path)
 
+
+
+
+
+
+
+
 @app.post("/respond")
 async def respond(req: ChatRequest):
     try:
-        
-        resume_context, jd_context = pinecone_search(req.session_id)
+        start = time.time()
+        if req.transcript.strip() == "":
+            welcome_text = (
+        f"Welcome! Let's begin your interview on {req.topic}. "
+        "Let me know when you're ready to start."
+    )
+            audio_base64 = await asyncio.to_thread(get_deepgram_audio_base64, welcome_text)
+            return {
+        "reply": welcome_text,
+        "audio_base64": audio_base64
+    }
+
+        # Run Pinecone search in a separate thread (IO-bound)
+        resume_context, jd_context = await asyncio.to_thread(pinecone_search, req.session_id)
+
+        # Construct prompt
         if req.topic == "Resume Based Questions":
             prompt = (
                 "You are an AI interviewer conducting a mock interview.\n\n"
@@ -308,7 +324,6 @@ async def respond(req: ChatRequest):
                 f"### Job Description:\n{jd_context}\n\n"
                 f"### Candidate Resume:\n{resume_context}"
             )
-
         else:
             prompt = (
                 f"You are a friendly and professional AI interviewer for the topic: {req.topic}. "
@@ -319,33 +334,24 @@ async def respond(req: ChatRequest):
                 "Do not say 'Do you have any questions?' or 'Thank you for your time' unless the user clearly signals the interview is over. "
                 "If the user goes off-topic, gently steer them back with a polite reminder."
             )
-        
-        if req.transcript.strip() == "":
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        f"Welcome! Let's begin your interview on {req.topic}. "
-                        "Let me know when you're ready to start."
-                    )
-                }
-            ]
-            reply_text = messages[0]["content"]
-        else:
-            messages = [
-                {"role": "system", "content": prompt},
-                *req.history,
-                {"role": "user", "content": f"The candidate answered: \"{req.transcript}\""}
-            ]
 
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages,
-                temperature=0.4
-            )
+        # Construct messages for OpenAI
+        messages = [
+            {"role": "system", "content": prompt},
+            *req.history,
+            {"role": "user", "content": f"The candidate answered: \"{req.transcript}\""}
+        ]
 
-            reply_text = response.choices[0].message.content
+        # Run OpenAI call in background thread (blocking)
+        openai_response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model="gpt-4o-mini",
+            messages=messages,
+            temperature=0.4
+        )
+        reply_text = openai_response.choices[0].message.content.strip()
 
+        # Get audio (optional, in background thread too)
         #audio_base64 = get_elevenlabs_audio_base64(reply_text)
 
 
@@ -359,10 +365,8 @@ async def respond(req: ChatRequest):
 
         # # Convert audio bytes to base64 string for JSON transport
         # audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
-        if reply_text.strip():
-            audio_base64 = get_deepgram_audio_base64(reply_text)
-        else:
-            audio_base64 = None
+        audio_base64 = await asyncio.to_thread(get_deepgram_audio_base64, reply_text)
+        print("Embedding took", time.time() - start)
 
         return {
             "reply": reply_text,
@@ -371,6 +375,8 @@ async def respond(req: ChatRequest):
 
     except Exception as e:
         return {"error": str(e)}
+
+
     
 @app.post("/feedback")
 async def feedback(req: ChatRequest):
