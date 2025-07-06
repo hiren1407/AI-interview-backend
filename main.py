@@ -118,41 +118,30 @@ def get_elevenlabs_audio_base64(text):
         print("ElevenLabs error:", e)
         return None
 
-
+tts_semaphore = asyncio.Semaphore(5)
 async def get_deepgram_audio_base64(text: str, voice: str = "aura-asteria-en"):
-    """
-    Converts text to speech using Deepgram's TTS API and returns base64-encoded audio.
-    Non-blocking async version.
-    """
-    if not text or not text.strip():
-        print("Deepgram TTS error: Empty text input.")
+    if not text.strip():
         return None
 
-    try:
-        DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
-        url = f"https://api.deepgram.com/v1/speak?model={voice}"
+    DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+    url = "https://api.deepgram.com/v1/speak"
+    headers = {
+        "Authorization": f"Token {DEEPGRAM_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = { "text": text.strip() }
 
-        headers = {
-            "Authorization": f"Token {DEEPGRAM_API_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "text": text.strip()
-        }
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(url, json=payload, headers=headers)
-
-        if response.status_code != 200:
-            print("Deepgram TTS error:", response.json())
-            return None
-
-        return base64.b64encode(response.content).decode("utf-8")
-
-    except Exception as e:
-        print("Deepgram TTS exception:", e)
-        return None
+    async with tts_semaphore:
+        async with httpx.AsyncClient(timeout=30) as client:
+            try:
+                response = await client.post(url, json=payload, headers=headers)
+                if response.status_code != 200:
+                    print("TTS Error:", response.text)
+                    return None
+                return base64.b64encode(response.content).decode("utf-8")
+            except Exception as e:
+                print("TTS Exception:", e)
+                return None
 
     
 
