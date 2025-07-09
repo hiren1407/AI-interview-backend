@@ -238,7 +238,7 @@ async def transcribe(file: UploadFile = File(...), session_id: str = Form(...)):
             }
             params = {
                 "punctuate": "true",
-                "model": "nova",
+                "model": "nova-3",
                 "language": "en",
             }
 
@@ -276,8 +276,9 @@ async def transcribe(file: UploadFile = File(...), session_id: str = Form(...)):
 
 @app.post("/respond")
 async def respond(req: ChatRequest):
+    total = time.time()
     try:
-        start = time.time()
+        
         if req.transcript.strip() == "":
             welcome_text = (
         f"Welcome! Let's begin your interview on {req.topic}. "
@@ -290,10 +291,11 @@ async def respond(req: ChatRequest):
     }
 
         # Run Pinecone search in a separate thread (IO-bound)
-        resume_context, jd_context = await asyncio.to_thread(pinecone_search, req.session_id)
+        
 
         # Construct prompt
         if req.topic == "Resume Based Questions":
+            resume_context, jd_context = await asyncio.to_thread(pinecone_search, req.session_id)
             prompt = (
                 "You are an AI interviewer conducting a mock interview.\n\n"
                 "You only have access to the candidate's resume — there is no job description.\n\n"
@@ -308,6 +310,7 @@ async def respond(req: ChatRequest):
                 f"### Candidate Resume:\n{resume_context}"
             )
         elif req.topic == "Resume + JD Based Questions":
+            resume_context, jd_context = await asyncio.to_thread(pinecone_search, req.session_id)
             prompt = (
                 "You are an AI interviewer conducting a mock interview.\n\n"
                 "The candidate has applied for a job described below. You also have access to their resume.\n\n"
@@ -339,7 +342,7 @@ async def respond(req: ChatRequest):
             *req.history,
             {"role": "user", "content": f"The candidate answered: \"{req.transcript}\""}
         ]
-
+        start = time.time()
         # Run OpenAI call in background thread (blocking)
         openai_response = await asyncio.to_thread(
             client.chat.completions.create,
@@ -348,6 +351,7 @@ async def respond(req: ChatRequest):
             temperature=0.4
         )
         reply_text = openai_response.choices[0].message.content.strip()
+        print("GPT took", time.time() - start)
 
         # Get audio (optional, in background thread too)
         #audio_base64 = get_elevenlabs_audio_base64(reply_text)
@@ -363,9 +367,11 @@ async def respond(req: ChatRequest):
 
         # # Convert audio bytes to base64 string for JSON transport
         # audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+        start = time.time()
         audio_base64 = await get_deepgram_audio_base64(reply_text)
-        print("Embedding took", time.time() - start)
-
+        print("Deepgram tts took", time.time() - start)
+        
+        print("Total res time", time.time() - total)
         return {
             "reply": reply_text,
             "audio_base64": audio_base64
