@@ -119,12 +119,12 @@ def get_elevenlabs_audio_base64(text):
         return None
 
 tts_semaphore = asyncio.Semaphore(5)
-async def get_deepgram_audio_base64(text: str, voice: str = "aura-asteria-en"):
+async def get_deepgram_audio_base64(text: str):
     if not text.strip():
         return None
 
     DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
-    url = "https://api.deepgram.com/v1/speak"
+    url = "https://api.deepgram.com/v1/speak?model=aura-2-thalia-en"
     headers = {
         "Authorization": f"Token {DEEPGRAM_API_KEY}",
         "Content-Type": "application/json"
@@ -329,6 +329,10 @@ async def respond(req: ChatRequest):
                 "- Never ask for job position clarification (since no JD is provided)\n\n"
                 "CRITICAL: You are actively interviewing the candidate. Do NOT provide meta-advice or suggestions about how to handle responses. "
                 "Instead, respond directly as an interviewer would.\n\n"
+                "STAY FOCUSED: This is a RESUME-BASED interview. If the candidate mentions technologies or topics not in their resume or unrelated to the discussion, "
+                "acknowledge briefly but redirect back to their resume experiences. For example: "
+                "'That's interesting, but let's focus on your resume. Can you tell me more about [specific resume item]?' "
+                "Do NOT start exploring unrelated technologies they mention if they're not relevant to the resume discussion.\n\n"
                 "If a candidate gives short responses like 'no', 'nope', or seems disengaged:\n"
                 "- Gently probe for more details\n"
                 "- Rephrase the question\n"
@@ -372,6 +376,10 @@ async def respond(req: ChatRequest):
                 "- Never ask generic questions like which position?\n\n"
                 "CRITICAL: You are actively interviewing the candidate. Do NOT provide meta-advice or suggestions about how to handle responses. "
                 "Instead, respond directly as an interviewer would.\n\n"
+                "STAY FOCUSED: This interview is for the specific job described below. If the candidate mentions technologies or experiences "
+                "not related to the job requirements or their relevant resume experiences, acknowledge briefly but redirect back to job-relevant topics. "
+                "For example: 'That's interesting, but for this role, I'd like to focus on [job-relevant skill]. Can you tell me about...?' "
+                "Do NOT start exploring unrelated technologies or experiences if they don't match the job requirements.\n\n"
                 "If a candidate gives short responses like 'no', 'nope', or seems disengaged:\n"
                 "- Gently probe for more details\n"
                 "- Rephrase the question\n"
@@ -396,14 +404,17 @@ async def respond(req: ChatRequest):
                 "Always respond in English. "
                 "CRITICAL: Do NOT provide meta-advice or suggestions about how to handle responses. "
                 "Instead, respond directly as an interviewer would. "
+                f"STAY FOCUSED: This interview is specifically about {req.topic}. If the candidate mentions unrelated technologies or topics, "
+                "acknowledge briefly but ALWAYS redirect back to the main topic. For example: "
+                "'That's interesting, but let's focus on [main topic]. Can you tell me about...?' "
+                "Do NOT change the interview focus or start asking about the unrelated technology they mentioned. "
                 "If a candidate gives short responses like 'no', 'nope', or seems disengaged: "
                 "gently probe for more details, rephrase the question, or move to a related topic naturally. "
                 "Avoid summarizing the entire interview or ending the session unless explicitly asked. "
                 "Do not say 'Do you have any questions?' or 'Thank you for your time' unless the user clearly signals the interview is over. "
-                "If the user goes off-topic, gently steer them back with a polite reminder. "
                 "RESPONSE FORMAT - Always follow this structure: "
                 "1. One brief feedback sentence (optional) "
-                "2. ONE single interview question "
+                "2. ONE single interview question RELATED TO THE MAIN TOPIC "
                 "3. Stop there - do not ask multiple questions or provide options. "
                 "NEVER ask multiple questions like 'What was your experience? How did you handle it? What did you learn?' "
                 "Instead ask: 'What was your experience with that technology?'"
@@ -416,9 +427,11 @@ async def respond(req: ChatRequest):
                     base_prompt + "\n\n"
                     "You have access to the candidate's resume. Use this information to ask more targeted questions "
                     "and provide relevant feedback based on their background and experience.\n\n"
+                    f"However, keep the focus on {req.topic}. If they mention technologies not related to {req.topic}, "
+                    "acknowledge briefly and redirect: 'That's good to know, but for this {req.topic} interview, let's focus on...'\n\n"
                     "RESPONSE FORMAT - Always follow this structure:\n"
                     "1. One brief feedback sentence (optional)\n"
-                    "2. ONE single interview question\n"
+                    "2. ONE single interview question RELATED TO THE MAIN TOPIC\n"
                     "3. Stop there - do not ask multiple questions or provide options\n\n"
                     "NEVER ask multiple questions like 'What was your experience? How did you handle it? What did you learn?'\n"
                     "Instead ask: 'What was your experience with that technology?'\n\n"
@@ -427,17 +440,20 @@ async def respond(req: ChatRequest):
             else:
                 prompt = (
                     base_prompt + "\n\n"
-                    "You do not have access to the candidate's resume, so focus on their general knowledge and experience in the topic area. "
+                    f"You do not have access to the candidate's resume, so focus on their general knowledge and experience in {req.topic}. "
                     "Ask one question at a time and build the conversation naturally based on their responses.\n\n"
+                    f"STAY STRICTLY ON TOPIC: This interview is about {req.topic}. If the candidate mentions unrelated technologies "
+                    f"(like talking about Java in a Python interview), acknowledge briefly but redirect: "
+                    f"'That's interesting, but let's keep our focus on {req.topic}. Can you tell me about...?'\n\n"
                     "RESPONSE FORMAT - Always follow this structure:\n"
                     "1. One brief feedback sentence (optional)\n"
-                    "2. ONE single interview question\n"
+                    f"2. ONE single interview question ABOUT {req.topic}\n"
                     "3. Stop there - do not ask multiple questions or provide numbered lists\n\n"
                     "NEVER provide multiple questions like:\n"
                     "'1. Basic Concepts: Can you explain...?\n"
                     "2. Control Flow: How does...?\n"
                     "3. Functions: What is...?'\n\n"
-                    "Instead ask ONE question like: 'Can you explain the difference between a list and a tuple in Python?'\n\n"
+                    f"Instead ask ONE question like: 'Can you explain [specific {req.topic} concept]?'\n\n"
                     "Do NOT provide numbered lists or multiple choice options. Act like a human interviewer having a conversation."
                 )
 
