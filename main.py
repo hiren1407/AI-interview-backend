@@ -417,7 +417,7 @@ async def respond(req: ChatRequest):
                 "2. ONE single interview question RELATED TO THE MAIN TOPIC "
                 "3. Stop there - do not ask multiple questions or provide options. "
                 "NEVER ask multiple questions like 'What was your experience? How did you handle it? What did you learn?' "
-                "Instead ask: 'What was your experience with that technology?'"
+                "Instead ask: 'What was your experience with that technology?'\n\n"
                 f" The candidate's name is {candidate_name}. Use it naturally and sparingly." if candidate_name else ""
             )
             
@@ -750,3 +750,8 @@ def extract_name_from_resume(resume_text: str) -> str:
 
 # Store extracted names by session_id
 name_store = {}
+
+@app.get("/ping")
+async def ping():
+    """Health check endpoint"""
+    return {"status": "ok", "message": "pong"}
