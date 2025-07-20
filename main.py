@@ -194,6 +194,12 @@ async def upload_resume(file: UploadFile = File(...),session_id: str = Form(...)
 
         resume_store[session_id] = text
 
+        # Extract candidate's name for personalization
+        candidate_name = extract_name_from_resume(text)
+        if candidate_name:
+            name_store[session_id] = candidate_name
+            print(f"Extracted name for session {session_id}: {candidate_name}")
+
         splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
         chunks = splitter.split_text(text)
 
@@ -280,61 +286,160 @@ async def respond(req: ChatRequest):
     try:
         
         if req.transcript.strip() == "":
+            candidate_name = name_store.get(req.session_id, "")
+            name_greeting = f"Hello {candidate_name}! " if candidate_name else ""
             welcome_text = (
-        f"Welcome! Let's begin your interview on {req.topic}. "
-        "Let me know when you're ready to start."
-    )
+                f"{name_greeting}Welcome! Let's begin your interview on {req.topic}. "
+                "Let me know when you're ready to start."
+            )
             audio_base64 = await get_deepgram_audio_base64(welcome_text)
             return {
-        "reply": welcome_text,
-        "audio_base64": audio_base64
-    }
+                "reply": welcome_text,
+                "audio_base64": audio_base64
+            }
 
-        # Run Pinecone search in a separate thread (IO-bound)
+        # Check what data is available for this session
+        has_resume = await asyncio.to_thread(check_resume_available, req.session_id)
+        has_jd = await asyncio.to_thread(check_jd_available, req.session_id)
         
+        # Get candidate's name if available
+        candidate_name = name_store.get(req.session_id, "")
+        name_prefix = f"{candidate_name}, " if candidate_name else ""
+        
+        print(f"Session {req.session_id}: has_resume={has_resume}, has_jd={has_jd}, topic={req.topic}, name={candidate_name}")
 
         # Construct prompt
         if req.topic == "Resume Based Questions":
+            if not has_resume:
+                error_message = "I notice you've selected 'Resume Based Questions' but no resume has been uploaded for this session. Please upload your resume first, or choose a different interview topic."
+                audio_base64 = await get_deepgram_audio_base64(error_message)
+                return {
+                    "reply": error_message,
+                    "audio_base64": audio_base64,
+                    "error_type": "missing_resume"
+                }
+                
             resume_context, jd_context = await asyncio.to_thread(pinecone_search, req.session_id)
             prompt = (
-                "You are an AI interviewer conducting a mock interview.\n\n"
+                "You are an AI interviewer conducting a mock interview. You are the interviewer, not an advisor.\n\n"
                 "You only have access to the candidate's resume — there is no job description.\n\n"
                 "Ask questions that:\n"
                 "- Dive deep into the resume experiences\n"
                 "- Evaluate technical skills, leadership, and accomplishments\n"
                 "- Never ask for job position clarification (since no JD is provided)\n\n"
-                "Always respond in English. After each candidate response:\n"
-                "- Provide exactly **one** brief, constructive or encouraging sentence of feedback\n"
-                "- Then ask **one** relevant and concise follow-up interview question\n"
-                "- Do not ask multiple questions at once or give long explanations.\n\n"
+                "CRITICAL: You are actively interviewing the candidate. Do NOT provide meta-advice or suggestions about how to handle responses. "
+                "Instead, respond directly as an interviewer would.\n\n"
+                "If a candidate gives short responses like 'no', 'nope', or seems disengaged:\n"
+                "- Gently probe for more details\n"
+                "- Rephrase the question\n"
+                "- Move to a related topic\n"
+                "- Keep the conversation flowing naturally\n\n"
+                "RESPONSE FORMAT - Always follow this structure:\n"
+                "1. One brief feedback sentence (optional)\n"
+                "2. ONE single interview question\n"
+                "3. Stop there - do not ask multiple questions or provide options\n\n"
+                "NEVER ask multiple questions like 'What was your role? How did you handle challenges? What did you learn?'\n"
+                "Instead ask: 'What was your role in that project?'\n\n"
+                f"- The candidate's name is {candidate_name}. Use it naturally and sparingly.\n\n" if candidate_name else "- Keep questions professional and engaging\n\n"
                 f"### Candidate Resume:\n{resume_context}"
             )
         elif req.topic == "Resume + JD Based Questions":
+            if not has_resume:
+                error_message = "I notice you've selected 'Resume + JD Based Questions' but no resume has been uploaded for this session. Please upload your resume first."
+                audio_base64 = await get_deepgram_audio_base64(error_message)
+                return {
+                    "reply": error_message,
+                    "audio_base64": audio_base64,
+                    "error_type": "missing_resume"
+                }
+            
+            if not has_jd:
+                error_message = "I notice you've selected 'Resume + JD Based Questions' but no job description has been uploaded for this session. Please upload the job description first, or choose 'Resume Based Questions' instead."
+                audio_base64 = await get_deepgram_audio_base64(error_message)
+                return {
+                    "reply": error_message,
+                    "audio_base64": audio_base64,
+                    "error_type": "missing_jd"
+                }
+                
             resume_context, jd_context = await asyncio.to_thread(pinecone_search, req.session_id)
             prompt = (
-                "You are an AI interviewer conducting a mock interview.\n\n"
+                "You are an AI interviewer conducting a mock interview. You are the interviewer, not an advisor.\n\n"
                 "The candidate has applied for a job described below. You also have access to their resume.\n\n"
                 "Ask questions that:\n"
                 "- Match the job description\n"
                 "- Dig into relevant past experiences\n"
                 "- Never ask generic questions like which position?\n\n"
-                "Always respond in English. After each candidate response:\n"
-                "- Provide exactly **one** brief, constructive or encouraging sentence of feedback\n"
-                "- Then ask **one** relevant and concise follow-up interview question\n"
-                "- Do not ask multiple questions at once or give long explanations.\n\n"
+                "CRITICAL: You are actively interviewing the candidate. Do NOT provide meta-advice or suggestions about how to handle responses. "
+                "Instead, respond directly as an interviewer would.\n\n"
+                "If a candidate gives short responses like 'no', 'nope', or seems disengaged:\n"
+                "- Gently probe for more details\n"
+                "- Rephrase the question\n"
+                "- Move to a related topic\n"
+                "- Keep the conversation flowing naturally\n\n"
+                "RESPONSE FORMAT - Always follow this structure:\n"
+                "1. One brief feedback sentence (optional)\n"
+                "2. ONE single interview question\n"
+                "3. Stop there - do not ask multiple questions or provide options\n\n"
+                "NEVER ask multiple questions like 'What was your role? How did you handle challenges? What did you learn?'\n"
+                "Instead ask: 'What was your role in that project?'\n\n"
+                f"- The candidate's name is {candidate_name}. Use it naturally and sparingly.\n\n" if candidate_name else "- Keep questions professional and engaging\n\n"
                 f"### Job Description:\n{jd_context}\n\n"
                 f"### Candidate Resume:\n{resume_context}"
             )
         else:
-            prompt = (
-                f"You are a friendly and professional AI interviewer for the topic: {req.topic}. "
+            # For other topics, check if resume is available and use it for context
+            resume_context, jd_context = await asyncio.to_thread(pinecone_search, req.session_id)
+            
+            base_prompt = (
+                f"You are a friendly and professional AI interviewer for the topic: {req.topic}. You are the interviewer, not an advisor. "
                 "Always respond in English. "
-                "After each candidate response, first provide a brief encouraging or constructive comment (1 sentence), "
-                "then immediately ask the next concise and relevant interview question. "
+                "CRITICAL: Do NOT provide meta-advice or suggestions about how to handle responses. "
+                "Instead, respond directly as an interviewer would. "
+                "If a candidate gives short responses like 'no', 'nope', or seems disengaged: "
+                "gently probe for more details, rephrase the question, or move to a related topic naturally. "
                 "Avoid summarizing the entire interview or ending the session unless explicitly asked. "
                 "Do not say 'Do you have any questions?' or 'Thank you for your time' unless the user clearly signals the interview is over. "
-                "If the user goes off-topic, gently steer them back with a polite reminder."
+                "If the user goes off-topic, gently steer them back with a polite reminder. "
+                "RESPONSE FORMAT - Always follow this structure: "
+                "1. One brief feedback sentence (optional) "
+                "2. ONE single interview question "
+                "3. Stop there - do not ask multiple questions or provide options. "
+                "NEVER ask multiple questions like 'What was your experience? How did you handle it? What did you learn?' "
+                "Instead ask: 'What was your experience with that technology?'"
+                f" The candidate's name is {candidate_name}. Use it naturally and sparingly." if candidate_name else ""
             )
+            
+            # Add resume context if available
+            if resume_context and resume_context.strip():
+                prompt = (
+                    base_prompt + "\n\n"
+                    "You have access to the candidate's resume. Use this information to ask more targeted questions "
+                    "and provide relevant feedback based on their background and experience.\n\n"
+                    "RESPONSE FORMAT - Always follow this structure:\n"
+                    "1. One brief feedback sentence (optional)\n"
+                    "2. ONE single interview question\n"
+                    "3. Stop there - do not ask multiple questions or provide options\n\n"
+                    "NEVER ask multiple questions like 'What was your experience? How did you handle it? What did you learn?'\n"
+                    "Instead ask: 'What was your experience with that technology?'\n\n"
+                    f"### Candidate Resume:\n{resume_context}"
+                )
+            else:
+                prompt = (
+                    base_prompt + "\n\n"
+                    "You do not have access to the candidate's resume, so focus on their general knowledge and experience in the topic area. "
+                    "Ask one question at a time and build the conversation naturally based on their responses.\n\n"
+                    "RESPONSE FORMAT - Always follow this structure:\n"
+                    "1. One brief feedback sentence (optional)\n"
+                    "2. ONE single interview question\n"
+                    "3. Stop there - do not ask multiple questions or provide numbered lists\n\n"
+                    "NEVER provide multiple questions like:\n"
+                    "'1. Basic Concepts: Can you explain...?\n"
+                    "2. Control Flow: How does...?\n"
+                    "3. Functions: What is...?'\n\n"
+                    "Instead ask ONE question like: 'Can you explain the difference between a list and a tuple in Python?'\n\n"
+                    "Do NOT provide numbered lists or multiple choice options. Act like a human interviewer having a conversation."
+                )
 
         # Construct messages for OpenAI
         messages = [
@@ -385,44 +490,247 @@ async def respond(req: ChatRequest):
 @app.post("/feedback")
 async def feedback(req: ChatRequest):
     try:
-        resume_text = resume_store.get(req.session_id, "")
-        chat_log = "\n".join(
-            [f"{m['role'].capitalize()}: {m['content']}" for m in req.history]
-        )
+        # Get resume and JD context from Pinecone for better feedback
+        resume_context, jd_context = await asyncio.to_thread(pinecone_search, req.session_id)
+        
+        # Format the conversation history better
+        chat_log = []
+        for i, message in enumerate(req.history):
+            if message['role'] == 'user':
+                chat_log.append(f"Candidate Response {i//2 + 1}: {message['content']}")
+            elif message['role'] == 'assistant':
+                chat_log.append(f"Interviewer Question {i//2 + 1}: {message['content']}")
+        
+        conversation_text = "\n\n".join(chat_log)
 
+        # Build comprehensive prompt for better feedback
         prompt = (
-            "You're an expert AI interviewer and you are very strict. Based on the following interview transcript and resume (if any), "
-            "provide two things:\n\n"
-            "1. A score from 1 to 10 based on the candidate's overall performance.\n"
-            "2. A 3–5 sentence feedback highlighting strengths and areas for improvement.\n\n"
+            "You are an expert interview evaluation specialist. Analyze this interview transcript carefully and provide detailed, accurate feedback.\n\n"
+            "EVALUATION CRITERIA:\n"
+            "- Technical Knowledge & Skills (25%)\n"
+            "- Communication & Clarity (20%)\n"
+            "- Problem-Solving Approach (20%)\n"
+            "- Relevant Experience Discussion (15%)\n"
+            "- Professionalism & Engagement (10%)\n"
+            "- Question Handling & Follow-ups (10%)\n\n"
+            
+            "SCORING GUIDELINES:\n"
+            "- 9-10: Exceptional performance, ready for senior roles\n"
+            "- 7-8: Strong performance, good candidate\n"
+            "- 5-6: Average performance, some concerns\n"
+            "- 3-4: Below average, significant gaps\n"
+            "- 1-2: Poor performance, major deficiencies\n\n"
         )
 
-        if resume_text:
-            prompt += f"Resume:\n{resume_text}\n\n"
+        # Add context if available
+        if resume_context and resume_context.strip():
+            prompt += f"CANDIDATE'S RESUME CONTEXT:\n{resume_context}\n\n"
+        
+        if jd_context and jd_context.strip():
+            prompt += f"JOB REQUIREMENTS:\n{jd_context}\n\n"
+        
+        if req.topic:
+            prompt += f"INTERVIEW TOPIC: {req.topic}\n\n"
 
-        prompt += f"Interview Transcript:\n{chat_log}\n\n"
+        prompt += f"INTERVIEW TRANSCRIPT:\n{conversation_text}\n\n"
 
         prompt += (
-            "Respond in the following JSON format:\n"
-            '{"score": <number from 1 to 10>, "feedback": "<text>"}'
+            "INSTRUCTIONS:\n"
+            "1. Analyze each response for depth, accuracy, and relevance\n"
+            "2. Consider the candidate's communication style and clarity\n"
+            "3. Evaluate how well they handled follow-up questions\n"
+            "4. Compare their responses to their resume (if available)\n"
+            "5. Assess technical accuracy and problem-solving approach\n\n"
+            
+            "Provide your evaluation in the following JSON format:\n"
+            "{\n"
+            '  "score": <integer from 1-10>,\n'
+            '  "feedback": "<detailed 4-6 sentence analysis covering strengths, weaknesses, and specific recommendations>",\n'
+            '  "technical_score": <integer from 1-10>,\n'
+            '  "communication_score": <integer from 1-10>,\n'
+            '  "strengths": ["<strength1>", "<strength2>"],\n'
+            '  "areas_for_improvement": ["<area1>", "<area2>"],\n'
+            '  "specific_examples": "<reference specific parts of the conversation>"\n'
+            "}\n\n"
+            "Be specific, constructive, and avoid generic statements. Reference actual parts of the conversation."
         )
 
         messages = [{"role": "system", "content": prompt}]
 
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o",  # Using GPT-4 for better analysis
             messages=messages,
-            temperature=0.4
+            temperature=0.2  # Lower temperature for more consistent feedback
         )
 
         import json
-        parsed = json.loads(response.choices[0].message.content)
-
-        return parsed
+        try:
+            parsed = json.loads(response.choices[0].message.content)
+            
+            # Validate the response structure
+            required_fields = ["score", "feedback", "technical_score", "communication_score", "strengths", "areas_for_improvement"]
+            for field in required_fields:
+                if field not in parsed:
+                    raise ValueError(f"Missing required field: {field}")
+            
+            return parsed
+            
+        except json.JSONDecodeError as e:
+            # Fallback if JSON parsing fails
+            print(f"JSON parsing error: {e}")
+            print(f"Raw response: {response.choices[0].message.content}")
+            
+            # Try to extract basic score and feedback
+            content = response.choices[0].message.content
+            return {
+                "score": 5,
+                "feedback": content,
+                "technical_score": 5,
+                "communication_score": 5,
+                "strengths": ["Participated in the interview"],
+                "areas_for_improvement": ["Need more detailed analysis"],
+                "specific_examples": "Analysis could not be parsed properly",
+                "error": "JSON parsing failed, showing raw response"
+            }
 
     except Exception as e:
+        print(f"Feedback endpoint error: {e}")
         return {"error": str(e)}
 
 
 
-#comment 
+#comment
+
+def check_resume_available(session_id: str) -> bool:
+    """Check if resume data is available for the given session_id"""
+    try:
+        # Check in pinecone index
+        query_embedding = client.embeddings.create(
+            model="text-embedding-3-small",
+            input="resume content"
+        ).data[0].embedding
+
+        results = index.query(
+            vector=query_embedding,
+            top_k=1,
+            include_metadata=True,
+            filter={"session_id": session_id, "type": "resume"}
+        )
+        
+        return len(results["matches"]) > 0
+    except Exception as e:
+        print(f"Error checking resume availability: {e}")
+        return False
+
+def check_jd_available(session_id: str) -> bool:
+    """Check if job description data is available for the given session_id"""
+    try:
+        # Check in pinecone index
+        query_embedding = client.embeddings.create(
+            model="text-embedding-3-small",
+            input="job description content"
+        ).data[0].embedding
+
+        results = index.query(
+            vector=query_embedding,
+            top_k=1,
+            include_metadata=True,
+            filter={"session_id": session_id, "type": "jd"}
+        )
+        
+        return len(results["matches"]) > 0
+    except Exception as e:
+        print(f"Error checking JD availability: {e}")
+        return False
+
+@app.get("/session-data/{session_id}")
+async def get_session_data(session_id: str):
+    """Get information about what data is available for a session"""
+    try:
+        has_resume = await asyncio.to_thread(check_resume_available, session_id)
+        has_jd = await asyncio.to_thread(check_jd_available, session_id)
+        
+        return {
+            "session_id": session_id,
+            "has_resume": has_resume,
+            "has_jd": has_jd
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.delete("/session-data/{session_id}")
+async def delete_session_data(session_id: str):
+    """Delete all data for a specific session"""
+    try:
+        # Remove from in-memory stores
+        if session_id in resume_store:
+            del resume_store[session_id]
+        if session_id in name_store:
+            del name_store[session_id]
+        
+        # Delete from Pinecone index
+        # Note: Pinecone delete by metadata filter
+        try:
+            # Get all vectors for this session
+            query_embedding = client.embeddings.create(
+                model="text-embedding-3-small",
+                input="dummy query"
+            ).data[0].embedding
+            
+            results = index.query(
+                vector=query_embedding,
+                top_k=1000,  # Get all possible matches
+                include_metadata=True,
+                filter={"session_id": session_id}
+            )
+            
+            # Delete all found vectors
+            if results["matches"]:
+                ids_to_delete = [match["id"] for match in results["matches"]]
+                index.delete(ids=ids_to_delete)
+                
+        except Exception as e:
+            print(f"Error deleting from Pinecone: {e}")
+        
+        return {
+            "success": True,
+            "message": f"All data for session {session_id} has been deleted"
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def extract_name_from_resume(resume_text: str) -> str:
+    """Extract candidate's name from resume text using OpenAI"""
+    try:
+        if not resume_text or not resume_text.strip():
+            return ""
+            
+        name_extraction_prompt = (
+            "Extract the candidate's name from this resume text. "
+            "Return only the first name or first and last name, nothing else. "
+            "If no clear name is found, return an empty string.\n\n"
+            f"Resume text:\n{resume_text[:1000]}"  # First 1000 chars to avoid token limits
+        )
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": name_extraction_prompt}],
+            temperature=0.1,
+            max_tokens=50
+        )
+        
+        name = response.choices[0].message.content.strip()
+        
+        # Basic validation - name should be reasonable length and contain only letters/spaces
+        if len(name) > 50 or not name.replace(" ", "").replace("-", "").isalpha():
+            return ""
+            
+        return name
+        
+    except Exception as e:
+        print(f"Error extracting name: {e}")
+        return ""
+
+# Store extracted names by session_id
+name_store = {}
