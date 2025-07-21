@@ -124,7 +124,7 @@ async def get_deepgram_audio_base64(text: str):
         return None
 
     DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
-    url = "https://api.deepgram.com/v1/speak?model=aura-2-thalia-en"
+    url = "https://api.deepgram.com/v1/speak?model=aura-asteria-en"
     headers = {
         "Authorization": f"Token {DEEPGRAM_API_KEY}",
         "Content-Type": "application/json"
